@@ -111,47 +111,6 @@ jobs:
           name: PackSync-macos-arm64
           path: dist/macos-arm64/PackSync-macos-arm64.dmg
 
-  # ── macOS x64 → PackSync-macos-x64.dmg ─────────────────────────────────────
-  macos-x64:
-    runs-on: macos-13
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install Tcl/Tk
-        run: brew install tcl-tk
-      - name: Install
-        run: pip install pyinstaller pystray Pillow watchdog
-      - name: Build app
-        env:
-          TCL_LIBRARY: /usr/local/opt/tcl-tk/lib/tcl8.6
-          TK_LIBRARY:  /usr/local/opt/tcl-tk/lib/tk8.6
-        run: |
-          python3 -m PyInstaller --onefile --windowed \
-            --name PackSync \
-            --distpath dist/macos-x64 \
-            --workpath dist/macos-x64/_build \
-            --specpath dist/macos-x64/_build \
-            --exclude-module PIL.ImageDraw \
-            --exclude-module PIL.ImageFilter \
-            --exclude-module PIL.ImageFont \
-            --exclude-module PIL.ImageEnhance \
-            --exclude-module PIL.ImageTk \
-            --exclude-module PIL.ImageQt \
-            pack_sync.py
-      - name: Create DMG
-        run: |
-          hdiutil create \
-            -volname "Pack Sync" \
-            -srcfolder dist/macos-x64/PackSync.app \
-            -ov -format UDZO \
-            dist/macos-x64/PackSync-macos-x64.dmg
-      - uses: actions/upload-artifact@v4
-        with:
-          name: PackSync-macos-x64
-          path: dist/macos-x64/PackSync-macos-x64.dmg
-
   # ── Linux x64 → PackSync-linux-x64.deb ─────────────────────────────────────
   linux-x64:
     runs-on: ubuntu-latest
@@ -216,7 +175,7 @@ jobs:
 
   # ── GitHub Release ─────────────────────────────────────────────────────────
   release:
-    needs: [windows-x64, windows-arm64, macos-arm64, macos-x64, linux-x64]
+    needs: [windows-x64, windows-arm64, macos-arm64, linux-x64]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
@@ -240,11 +199,9 @@ jobs:
             | Windows x64 | `PackSync-windows-x64.exe` | Double-click |
             | Windows ARM64 | `PackSync-windows-arm64.exe` | Double-click |
             | macOS Apple Silicon | `PackSync-macos-arm64.dmg` | Open DMG, drag to Applications |
-            | macOS Intel | `PackSync-macos-x64.dmg` | Open DMG, drag to Applications |
             | Linux x64 | `PackSync-linux-x64.deb` | `sudo dpkg -i PackSync-linux-x64.deb` |
           files: |
             artifacts/PackSync-windows-x64/PackSync-windows-x64.exe
             artifacts/PackSync-windows-arm64/PackSync-windows-arm64.exe
             artifacts/PackSync-macos-arm64/PackSync-macos-arm64.dmg
-            artifacts/PackSync-macos-x64/PackSync-macos-x64.dmg
             artifacts/PackSync-linux-x64/PackSync-linux-x64.deb
