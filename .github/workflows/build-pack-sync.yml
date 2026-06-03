@@ -32,12 +32,24 @@ jobs:
             --exclude-module PIL.ImageTk `
             --exclude-module PIL.ImageQt `
             pack_sync.py
-      - name: Rename for release
-        run: Rename-Item dist/windows-x64/PackSync.exe PackSync-windows-x64.exe
+      - name: Compile TrayHelper.exe
+        run: |
+          $csc = (Get-ChildItem "C:\Windows\Microsoft.NET\Framework64\v4*\csc.exe" |
+                  Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          & $csc /target:exe /optimize+ /nologo `
+            /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
+            /out:dist/windows-x64/TrayHelper.exe TrayHelper.cs
+      - name: Package folder + zip
+        run: |
+          $dir = "PackSync-windows-x64"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item dist/windows-x64/PackSync.exe   "$dir/PackSync.exe"
+          Copy-Item dist/windows-x64/TrayHelper.exe "$dir/TrayHelper.exe"
+          Compress-Archive -Path $dir -DestinationPath "PackSync-windows-x64.zip" -Force
       - uses: actions/upload-artifact@v4
         with:
           name: PackSync-windows-x64
-          path: dist/windows-x64/PackSync-windows-x64.exe
+          path: PackSync-windows-x64.zip
 
   # ── Windows ARM64 → PackSync-windows-arm64.exe ─────────────────────────────
   windows-arm64:
@@ -63,12 +75,24 @@ jobs:
             --exclude-module PIL.ImageTk `
             --exclude-module PIL.ImageQt `
             pack_sync.py
-      - name: Rename for release
-        run: Rename-Item dist/windows-arm64/PackSync.exe PackSync-windows-arm64.exe
+      - name: Compile TrayHelper.exe
+        run: |
+          $csc = (Get-ChildItem "C:\Windows\Microsoft.NET\Framework64\v4*\csc.exe" |
+                  Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          & $csc /target:exe /optimize+ /nologo `
+            /reference:System.Windows.Forms.dll /reference:System.Drawing.dll `
+            /out:dist/windows-arm64/TrayHelper.exe TrayHelper.cs
+      - name: Package folder + zip
+        run: |
+          $dir = "PackSync-windows-arm64"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item dist/windows-arm64/PackSync.exe   "$dir/PackSync.exe"
+          Copy-Item dist/windows-arm64/TrayHelper.exe "$dir/TrayHelper.exe"
+          Compress-Archive -Path $dir -DestinationPath "PackSync-windows-arm64.zip" -Force
       - uses: actions/upload-artifact@v4
         with:
           name: PackSync-windows-arm64
-          path: dist/windows-arm64/PackSync-windows-arm64.exe
+          path: PackSync-windows-arm64.zip
 
   # ── macOS ARM64 → PackSync-macos-arm64.dmg ─────────────────────────────────
   macos-arm64:
@@ -196,12 +220,12 @@ jobs:
 
             | Platform | File | Install |
             |---|---|---|
-            | Windows x64 | `PackSync-windows-x64.exe` | Double-click |
-            | Windows ARM64 | `PackSync-windows-arm64.exe` | Double-click |
+            | Windows x64 | `PackSync-windows-x64.zip` | Unzip, run PackSync.exe |
+            | Windows ARM64 | `PackSync-windows-arm64.zip` | Unzip, run PackSync.exe |
             | macOS Apple Silicon | `PackSync-macos-arm64.dmg` | Open DMG, drag to Applications |
             | Linux x64 | `PackSync-linux-x64.deb` | `sudo dpkg -i PackSync-linux-x64.deb` |
           files: |
-            artifacts/PackSync-windows-x64/PackSync-windows-x64.exe
-            artifacts/PackSync-windows-arm64/PackSync-windows-arm64.exe
+            artifacts/PackSync-windows-x64/PackSync-windows-x64.zip
+            artifacts/PackSync-windows-arm64/PackSync-windows-arm64.zip
             artifacts/PackSync-macos-arm64/PackSync-macos-arm64.dmg
             artifacts/PackSync-linux-x64/PackSync-linux-x64.deb

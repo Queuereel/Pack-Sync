@@ -31,8 +31,12 @@ if IS_WIN:
 # It owns the NotifyIcon and communicates with Pack Sync over stdin/stdout.
 
 def _find_tray_helper() -> "Path | None":
-    """Return path to TrayHelper.exe. In frozen builds it sits next to PackSync.exe."""
+    """Return path to TrayHelper.exe. It may be bundled INSIDE the onefile exe
+    (PyInstaller extracts it to sys._MEIPASS), or sit next to PackSync.exe."""
     bases = [Path(sys.executable).parent, Path(__file__).parent]
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bases.insert(0, Path(meipass))
     for b in bases:
         p = b / "TrayHelper.exe"
         if p.exists():
@@ -1679,7 +1683,9 @@ def _platform_asset_match(name: str) -> bool:
     slug = _platform_slug()
     if not slug:
         return False
-    ext = {".exe", ".dmg", ".deb"}
+    # Windows ships as a .zip (PackSync.exe + TrayHelper.exe in a folder);
+    # mac/Linux ship .dmg/.deb installers.
+    ext = {".zip"} if IS_WIN else {".dmg", ".deb"}
     has_ext = any(n.endswith(e) for e in ext)
     return slug in n and has_ext
 
@@ -1749,17 +1755,39 @@ def apply_app_update(info: dict, log=lambda *_: None) -> tuple[bool, str]:
             _download(info["asset_url"], out)
             return (True, f"downloaded to {out} — install it to finish updating")
 
-        tmp = new_dir / (exe.name + ".new")
+        # Windows asset is a .zip containing a folder with PackSync.exe +
+        # TrayHelper.exe. Download, extract, and swap each file in next to the
+        # running exe (the running PackSync.exe is moved aside to *.old since it
+        # can't be overwritten while running).
+        import zipfile, tempfile
+        zpath = new_dir / (info["asset_name"])
         log(f"Downloading v{info['version']}…")
-        _download(info["asset_url"], tmp)
-        if tmp.stat().st_size < 1024:
-            tmp.unlink(missing_ok=True)
+        _download(info["asset_url"], zpath)
+        if zpath.stat().st_size < 1024:
+            zpath.unlink(missing_ok=True)
             return (False, "downloaded file looks corrupt (too small)")
-        old = new_dir / (exe.name + ".old")
-        old.unlink(missing_ok=True)
-        log("Installing update…")
-        os.replace(exe, old)          # move running exe aside (allowed while running)
-        os.replace(tmp, exe)          # put new exe in place
+        log("Extracting…")
+        with tempfile.TemporaryDirectory(dir=str(new_dir)) as td:
+            with zipfile.ZipFile(zpath) as z:
+                z.extractall(td)
+            # Find the extracted files anywhere under the temp dir (the zip wraps
+            # them in a folder), and place them next to the current exe.
+            extracted = {p.name: p for p in Path(td).rglob("*") if p.is_file()}
+            new_exe = next((p for n, p in extracted.items()
+                            if n.lower() == "packsync.exe"), None)
+            if new_exe is None:
+                return (False, "update zip did not contain PackSync.exe")
+            log("Installing update…")
+            old = new_dir / (exe.name + ".old")
+            old.unlink(missing_ok=True)
+            os.replace(exe, old)              # move running exe aside
+            shutil.copy2(new_exe, exe)        # install new exe under existing name
+            helper = extracted.get("TrayHelper.exe") or next(
+                (p for n, p in extracted.items() if n.lower() == "trayhelper.exe"), None)
+            if helper is not None:
+                try: shutil.copy2(helper, new_dir / "TrayHelper.exe")
+                except Exception: pass
+        zpath.unlink(missing_ok=True)
         return (True, f"updated to v{info['version']} — restart Pack Sync to use it")
     except Exception as e:
         return (False, f"update error: {e}")
