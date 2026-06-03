@@ -1,0 +1,250 @@
+name: Build Pack Sync
+
+on:
+  push:
+    tags:
+      - 'pack-sync-v*'
+  workflow_dispatch:
+
+jobs:
+
+  # ── Windows x64 → PackSync-windows-x64.exe ─────────────────────────────────
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: pip install pyinstaller pystray Pillow
+      - name: Build
+        run: |
+          python -m PyInstaller --onefile --windowed --noconsole `
+            --name PackSync `
+            --distpath dist/windows-x64 `
+            --workpath dist/windows-x64/_build `
+            --specpath dist/windows-x64/_build `
+            --exclude-module PIL.ImageDraw `
+            --exclude-module PIL.ImageFilter `
+            --exclude-module PIL.ImageFont `
+            --exclude-module PIL.ImageEnhance `
+            --exclude-module PIL.ImageTk `
+            --exclude-module PIL.ImageQt `
+            pack_sync.py
+      - name: Rename for release
+        run: Rename-Item dist/windows-x64/PackSync.exe PackSync-windows-x64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PackSync-windows-x64
+          path: dist/windows-x64/PackSync-windows-x64.exe
+
+  # ── Windows ARM64 → PackSync-windows-arm64.exe ─────────────────────────────
+  windows-arm64:
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: pip install pyinstaller pystray Pillow
+      - name: Build
+        run: |
+          python -m PyInstaller --onefile --windowed --noconsole `
+            --name PackSync `
+            --distpath dist/windows-arm64 `
+            --workpath dist/windows-arm64/_build `
+            --specpath dist/windows-arm64/_build `
+            --exclude-module PIL.ImageDraw `
+            --exclude-module PIL.ImageFilter `
+            --exclude-module PIL.ImageFont `
+            --exclude-module PIL.ImageEnhance `
+            --exclude-module PIL.ImageTk `
+            --exclude-module PIL.ImageQt `
+            pack_sync.py
+      - name: Rename for release
+        run: Rename-Item dist/windows-arm64/PackSync.exe PackSync-windows-arm64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PackSync-windows-arm64
+          path: dist/windows-arm64/PackSync-windows-arm64.exe
+
+  # ── macOS ARM64 → PackSync-macos-arm64.dmg ─────────────────────────────────
+  macos-arm64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Tcl/Tk
+        run: brew install tcl-tk
+      - name: Install
+        run: pip install pyinstaller pystray Pillow watchdog
+      - name: Build app
+        env:
+          TCL_LIBRARY: /opt/homebrew/opt/tcl-tk/lib/tcl8.6
+          TK_LIBRARY:  /opt/homebrew/opt/tcl-tk/lib/tk8.6
+        run: |
+          python3 -m PyInstaller --onefile --windowed \
+            --name PackSync \
+            --distpath dist/macos-arm64 \
+            --workpath dist/macos-arm64/_build \
+            --specpath dist/macos-arm64/_build \
+            --exclude-module PIL.ImageDraw \
+            --exclude-module PIL.ImageFilter \
+            --exclude-module PIL.ImageFont \
+            --exclude-module PIL.ImageEnhance \
+            --exclude-module PIL.ImageTk \
+            --exclude-module PIL.ImageQt \
+            pack_sync.py
+      - name: Create DMG
+        run: |
+          hdiutil create \
+            -volname "Pack Sync" \
+            -srcfolder dist/macos-arm64/PackSync.app \
+            -ov -format UDZO \
+            dist/macos-arm64/PackSync-macos-arm64.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PackSync-macos-arm64
+          path: dist/macos-arm64/PackSync-macos-arm64.dmg
+
+  # ── macOS x64 → PackSync-macos-x64.dmg ─────────────────────────────────────
+  macos-x64:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Tcl/Tk
+        run: brew install tcl-tk
+      - name: Install
+        run: pip install pyinstaller pystray Pillow watchdog
+      - name: Build app
+        env:
+          TCL_LIBRARY: /usr/local/opt/tcl-tk/lib/tcl8.6
+          TK_LIBRARY:  /usr/local/opt/tcl-tk/lib/tk8.6
+        run: |
+          python3 -m PyInstaller --onefile --windowed \
+            --name PackSync \
+            --distpath dist/macos-x64 \
+            --workpath dist/macos-x64/_build \
+            --specpath dist/macos-x64/_build \
+            --exclude-module PIL.ImageDraw \
+            --exclude-module PIL.ImageFilter \
+            --exclude-module PIL.ImageFont \
+            --exclude-module PIL.ImageEnhance \
+            --exclude-module PIL.ImageTk \
+            --exclude-module PIL.ImageQt \
+            pack_sync.py
+      - name: Create DMG
+        run: |
+          hdiutil create \
+            -volname "Pack Sync" \
+            -srcfolder dist/macos-x64/PackSync.app \
+            -ov -format UDZO \
+            dist/macos-x64/PackSync-macos-x64.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PackSync-macos-x64
+          path: dist/macos-x64/PackSync-macos-x64.dmg
+
+  # ── Linux x64 → PackSync-linux-x64.deb ─────────────────────────────────────
+  linux-x64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: System packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            python3-tk libgtk-3-dev gir1.2-appindicator3-0.1 \
+            libgirepository1.0-dev dpkg
+      - name: Install
+        run: pip install pyinstaller pystray Pillow watchdog
+      - name: Build binary
+        run: |
+          python3 -m PyInstaller --onefile \
+            --name PackSync \
+            --distpath dist/linux-x64 \
+            --workpath dist/linux-x64/_build \
+            --specpath dist/linux-x64/_build \
+            --exclude-module PIL.ImageDraw \
+            --exclude-module PIL.ImageFilter \
+            --exclude-module PIL.ImageFont \
+            --exclude-module PIL.ImageEnhance \
+            --exclude-module PIL.ImageTk \
+            --exclude-module PIL.ImageQt \
+            pack_sync.py
+      - name: Create .deb
+        run: |
+          mkdir -p deb/DEBIAN \
+                   deb/usr/local/bin \
+                   deb/usr/share/applications
+
+          cat > deb/DEBIAN/control << 'EOF'
+          Package: pack-sync
+          Version: 1.0
+          Architecture: amd64
+          Maintainer: Queuereel
+          Description: Pack Sync — live-sync Minecraft Bedrock repos to com.mojang
+          EOF
+
+          cp dist/linux-x64/PackSync deb/usr/local/bin/PackSync
+          chmod 755 deb/usr/local/bin/PackSync
+
+          cat > deb/usr/share/applications/pack-sync.desktop << 'EOF'
+          [Desktop Entry]
+          Name=Pack Sync
+          Exec=/usr/local/bin/PackSync
+          Type=Application
+          Categories=Utility;
+          Comment=Live-sync Minecraft Bedrock pack repos to com.mojang
+          EOF
+
+          dpkg-deb --build deb dist/linux-x64/PackSync-linux-x64.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PackSync-linux-x64
+          path: dist/linux-x64/PackSync-linux-x64.deb
+
+  # ── GitHub Release ─────────────────────────────────────────────────────────
+  release:
+    needs: [windows-x64, windows-arm64, macos-arm64, macos-x64, linux-x64]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Pack Sync ${{ github.ref_name }}"
+          body: |
+            ## Pack Sync ${{ github.ref_name }}
+
+            No Python required — download and run.
+
+            | Platform | File | Install |
+            |---|---|---|
+            | Windows x64 | `PackSync-windows-x64.exe` | Double-click |
+            | Windows ARM64 | `PackSync-windows-arm64.exe` | Double-click |
+            | macOS Apple Silicon | `PackSync-macos-arm64.dmg` | Open DMG, drag to Applications |
+            | macOS Intel | `PackSync-macos-x64.dmg` | Open DMG, drag to Applications |
+            | Linux x64 | `PackSync-linux-x64.deb` | `sudo dpkg -i PackSync-linux-x64.deb` |
+          files: |
+            artifacts/PackSync-windows-x64/PackSync-windows-x64.exe
+            artifacts/PackSync-windows-arm64/PackSync-windows-arm64.exe
+            artifacts/PackSync-macos-arm64/PackSync-macos-arm64.dmg
+            artifacts/PackSync-macos-x64/PackSync-macos-x64.dmg
+            artifacts/PackSync-linux-x64/PackSync-linux-x64.deb

@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT  = Path(__file__).parent
-REMOTE_URL = "https://github.com/Queuereel/PixelArtTexture-Generator"
+REMOTE_URL = "https://github.com/Queuereel/Pack-Sync"
 TAG_PREFIX = "pack-sync-v"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

@@ -20,7 +20,7 @@ _NO_WIN  = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW — suppress console 
 # APP_VERSION must match the release tag (release tags are "pack-sync-v<APP_VERSION>").
 # Bump this in lock-step with release_pack_sync.py when cutting a release.
 APP_VERSION   = "1.0.0"
-UPDATE_REPO   = "Queuereel/PixelArtTexture-Generator"  # where releases are published
+UPDATE_REPO   = "Queuereel/Pack-Sync"  # where releases are published
 UPDATE_TAG_PREFIX = "pack-sync-v"
 
 if IS_WIN:
