@@ -50,15 +50,6 @@ HOW IT WORKS
      Project-Corestone/packs/RP  →  development_resource_packs/ProjectCorestoneRP
      Project-Corestone/packs/BP  →  development_behavior_packs/ProjectCorestoneBP
 
-3. After the first manual Sync, a live file watcher starts (OS-native,
-   zero idle CPU). Any file you save in the repo is instantly copied to
-   com.mojang — no terminal, no manual steps.
-
-4. If you switch git branches, Pack Sync detects it and asks before
-   overwriting the destination with the new branch's files.
-
-5. Manual Sync is bidirectional: files edited directly in Minecraft
-   (inside com.mojang) are copied back to your repo.
 
 6. The Remove button deletes the destination pack folders from com.mojang.
    If permissions block removal, Pack Sync force-removes using takeown/icacls
