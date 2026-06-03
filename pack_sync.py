@@ -1993,22 +1993,22 @@ def dest_path(mojang: Path, proj: dict, pack_type: str) -> Path:
 # On each sync we bump the last component and stamp the new version into the
 # manifests that were copied to com.mojang — the SOURCE manifests stay clean.
 
-def _bump_manifest_version_file(repo: Path) -> list[int] | None:
-    """Increment data/bump_manifest/version.json's last component and return the
-    new [major, minor, patch]. Returns None if the repo has no version ledger."""
+def _read_manifest_version(repo: Path) -> list[int] | None:
+    """READ the current version from data/bump_manifest/version.json. Returns the
+    [major, minor, patch] list, or None if there's no ledger.
+
+    We deliberately do NOT increment or write this file: the repo's own GitHub
+    Action owns the version bump and commits it. Pack Sync only reads the current
+    value and stamps it into the com.mojang manifests, so it never creates a
+    spurious local change that fights the Action."""
     vfile = repo / "packs" / "data" / "bump_manifest" / "version.json"
     if not vfile.exists():
-        # Also accept dataPath-relative location already resolved by caller via
-        # proj["regolith"]["data_path"]; caller passes repo, default layout here.
         return None
     try:
         data = json.loads(vfile.read_text(encoding="utf-8"))
         ver  = data.get("version")
         if not (isinstance(ver, list) and len(ver) >= 1):
             return None
-        ver[-1] = int(ver[-1]) + 1
-        data["version"] = ver
-        vfile.write_text(json.dumps(data, indent=4), encoding="utf-8")
         return ver
     except Exception:
         return None
@@ -3563,19 +3563,17 @@ class App(tk.Tk):
         pairs      = self._get_sync_pairs(proj)
         names, errs = [], []
 
-        # Version bump, the way Regolith does it: apply_version is a filter that
-        # runs on every build/export — it doesn't look at git at all. The
-        # equivalent of "a build happened" here is a full sync to com.mojang,
-        # i.e. the manual Sync button OR a post-pull sync (both land here). Live
-        # per-file edits are not a full build, so they don't bump (handled by the
-        # watcher path, which never calls this). Bumps the persistent counter
-        # once, stamps each pack's com.mojang manifest after copy; source
-        # manifests stay clean and the bump_manifest ledger is never shipped.
+        # Version stamping: the repo's own GitHub Action owns the version bump
+        # (it increments data/bump_manifest/version.json and commits it). Pack
+        # Sync must NOT touch that file, or it creates a spurious local change
+        # that conflicts with the Action. So we only READ the current version and
+        # stamp it into the com.mojang manifests after copy — never write back to
+        # the source. The bump_manifest ledger is also never shipped.
         bumped_version = None
         if self.cfg.get("auto_version_bump", True):
-            bumped_version = _bump_manifest_version_file(proj["path"])
+            bumped_version = _read_manifest_version(proj["path"])
             if bumped_version is not None:
-                self._status(f"Version → {'.'.join(map(str, bumped_version))}")
+                self._status(f"Version {'.'.join(map(str, bumped_version))}")
 
         for label, src, dst in pairs:
             bar_key = f"{proj['name']}:{label}"
