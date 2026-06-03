@@ -19,7 +19,7 @@ _NO_WIN  = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW — suppress console 
 # ── App version + self-update (GitHub Releases) ──────────────────────────────
 # APP_VERSION must match the release tag (release tags are "pack-sync-v<APP_VERSION>").
 # Bump this in lock-step with release_pack_sync.py when cutting a release.
-APP_VERSION   = "1.0.0"
+APP_VERSION   = "1.0.1"
 UPDATE_REPO   = "Queuereel/Pack-Sync"  # where releases are published
 UPDATE_TAG_PREFIX = "pack-sync-v"
 
@@ -3457,13 +3457,41 @@ class App(tk.Tk):
             self.after(0, lambda r=result, k=ok: self._status(
                 ("✓ " if k else "✕ ") + r))
             if ok:
-                self.after(0, lambda r=result: messagebox.showinfo(
-                    "Pack Sync updated", r))
+                # On Windows the new exe is now in place — relaunch it and quit
+                # so the user runs the updated build without doing anything.
+                if IS_WIN and _running_exe_path() is not None:
+                    self.after(0, lambda v=info["version"]: self._restart_into_update(v))
+                else:
+                    self.after(0, lambda r=result: messagebox.showinfo(
+                        "Pack Sync updated", r))
             elif manual:
                 self.after(0, lambda r=result: messagebox.showwarning(
                     "Update", r))
         finally:
             self._update_running = False
+
+    def _restart_into_update(self, version: str):
+        """Relaunch the freshly-swapped exe and exit this (old) process."""
+        try:
+            messagebox.showinfo(
+                "Pack Sync updated",
+                f"Updated to v{version}. Pack Sync will restart now.")
+            exe = _running_exe_path()
+            # Start the new exe minimized so it lands back in the tray, detached
+            # from this process so our exit doesn't kill it.
+            subprocess.Popen([str(exe), "--minimized"],
+                             creationflags=(0x00000008 if IS_WIN else 0),  # DETACHED_PROCESS
+                             close_fds=True)
+        except Exception as e:
+            messagebox.showwarning(
+                "Update", f"Updated, but couldn't auto-restart: {e}\n"
+                          "Please reopen Pack Sync manually.")
+        finally:
+            # Tear down tray + window and exit so the .old file can be cleaned
+            # up by the new process on its next launch.
+            try: self._quit_app()
+            except Exception:
+                os._exit(0)
 
     def _handle_branch_dlg(self, proj: dict, old: str, new: str):
         if self.cfg.get("auto_sync"):
