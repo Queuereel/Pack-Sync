@@ -1,0 +1,118 @@
+Building Pack Sync — native executables (no Python required)
+=============================================================
+
+AUTOMATED (recommended)
+------------------------
+Push a tag to GitHub and the CI workflow builds everything automatically:
+
+  git tag pack-sync-v1.0
+  git push origin pack-sync-v1.0
+
+GitHub Actions (.github/workflows/build-pack-sync.yml) will:
+  • Build natively on Windows x64, macOS ARM64, macOS x64, Linux x64
+  • Upload executables as release artifacts
+  • Create a GitHub Release with download links
+
+Download the resulting .zip / .tar.gz from the Releases page.
+No Python or pip needed on the target machine.
+
+
+MANUAL BUILD (Nuitka)
+----------------------
+Nuitka compiles Python to native C, then to machine code.
+Result: ~10-15 MB single executable, no Python runtime bundled.
+
+Each platform must be built on its own native machine.
+
+--- Windows x64 (run on Windows x64) ---
+
+  pip install nuitka pystray Pillow ordered-set zstandard
+  cd "Pack Sync"
+  python -m nuitka ^
+    --onefile ^
+    --windows-console-mode=disable ^
+    --enable-plugin=tk-inter ^
+    --assume-yes-for-downloads ^
+    --output-filename=PackSync.exe ^
+    pack_sync.py
+
+Output: Pack Sync\PackSync.exe
+
+
+--- Windows ARM64 (run on Windows 11 ARM, e.g. Surface Pro X) ---
+
+  pip install nuitka pystray Pillow ordered-set zstandard
+  cd "Pack Sync"
+  python -m nuitka ^
+    --onefile ^
+    --windows-console-mode=disable ^
+    --enable-plugin=tk-inter ^
+    --assume-yes-for-downloads ^
+    --output-filename=PackSync.exe ^
+    pack_sync.py
+
+  Install Python for ARM64 from: https://www.python.org/downloads/windows/
+  (choose the "ARM64" installer)
+
+Output: Pack Sync\PackSync.exe
+
+
+--- macOS Apple Silicon (run on M1/M2/M3 Mac) ---
+
+  brew install tcl-tk
+  pip3 install nuitka pystray Pillow ordered-set zstandard
+  cd "Pack Sync"
+  TCL_LIBRARY=/opt/homebrew/opt/tcl-tk/lib/tcl8.6 \
+  TK_LIBRARY=/opt/homebrew/opt/tcl-tk/lib/tk8.6 \
+  python3 -m nuitka \
+    --onefile \
+    --macos-create-app-bundle \
+    --enable-plugin=tk-inter \
+    --assume-yes-for-downloads \
+    --output-filename=PackSync \
+    pack_sync.py
+
+Output: Pack Sync/PackSync.app
+
+
+--- macOS Intel x64 (run on Intel Mac) ---
+
+  brew install tcl-tk
+  pip3 install nuitka pystray Pillow ordered-set zstandard
+  cd "Pack Sync"
+  TCL_LIBRARY=/usr/local/opt/tcl-tk/lib/tcl8.6 \
+  TK_LIBRARY=/usr/local/opt/tcl-tk/lib/tk8.6 \
+  python3 -m nuitka \
+    --onefile \
+    --macos-create-app-bundle \
+    --enable-plugin=tk-inter \
+    --assume-yes-for-downloads \
+    --output-filename=PackSync \
+    pack_sync.py
+
+Output: Pack Sync/PackSync.app
+
+
+--- Linux x64 (Ubuntu/Debian) ---
+
+  sudo apt-get install python3-tk libgtk-3-dev gir1.2-appindicator3-0.1 \
+                       libgirepository1.0-dev patchelf ccache
+  pip3 install nuitka pystray Pillow watchdog ordered-set zstandard
+  cd "Pack Sync"
+  python3 -m nuitka \
+    --onefile \
+    --enable-plugin=tk-inter \
+    --assume-yes-for-downloads \
+    --output-filename=PackSync \
+    pack_sync.py
+
+Output: Pack Sync/PackSync
+
+
+WHY NUITKA (not PyInstaller)
+-----------------------------
+PyInstaller bundles the entire Python runtime + all modules as bytecode.
+Result: ~60-80 MB, still interprets Python at runtime.
+
+Nuitka compiles Python source to C, then to native machine code via gcc/clang/msvc.
+Result: ~10-15 MB, runs as true native code, no interpreter overhead.
