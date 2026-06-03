@@ -116,6 +116,35 @@ ans = input("  Push tag and start build? (y/N): ").strip().lower()
 if ans != "y":
     die("Aborted.")
 
+# ── Stamp APP_VERSION into pack_sync.py and commit ────────────────────────────
+# The running build compares its APP_VERSION against the latest release tag, so
+# they must match or the updater can never detect this release. Bump it here,
+# commit, THEN tag (the tag must point at the commit carrying the new version).
+ps_file = REPO_ROOT / "pack_sync.py"
+try:
+    text = ps_file.read_text(encoding="utf-8")
+    new_text, n = re.subn(
+        r'(APP_VERSION\s*=\s*)"[^"]*"',
+        rf'\g<1>"{new_version}"', text, count=1)
+    if n == 0:
+        die("Could not find APP_VERSION in pack_sync.py to bump.")
+    if new_text != text:
+        ps_file.write_text(new_text, encoding="utf-8")
+        print(f"  Stamped APP_VERSION = {new_version} in pack_sync.py")
+        run(["git", "add", "pack_sync.py"])
+        c = run(["git", "commit", "-m", f"Release {new_version}"])
+        if c.returncode != 0:
+            die(f"Could not commit version bump:\n{c.stderr.strip()}")
+        p = run(["git", "push", "origin", branch])
+        if p.returncode != 0:
+            die(f"Could not push version bump:\n{p.stderr.strip()}")
+    else:
+        print(f"  APP_VERSION already {new_version}; no bump needed.")
+except SystemExit:
+    raise
+except Exception as e:
+    die(f"Version stamp failed: {e}")
+
 # ── Tag and push ──────────────────────────────────────────────────────────────
 print(f"\n  Creating tag {tag} ...")
 r = run(["git", "tag", tag])
