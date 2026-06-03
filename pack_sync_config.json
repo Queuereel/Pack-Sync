@@ -1,8 +1,8 @@
 {
   "window_w": 751,
-  "window_h": 715,
-  "window_x": 467,
-  "window_y": 380,
+  "window_h": 724,
+  "window_x": 468,
+  "window_y": 522,
   "project_type": "minecraft",
   "github_dir": "C:\\Users\\Administrator\\Documents\\GitHub",
   "mojang_dir": "C:\\Users\\Administrator\\AppData\\Roaming\\Minecraft Bedrock\\Users\\Shared\\games\\com.mojang",
@@ -11,7 +11,10 @@
   "hidden_repos": [],
   "auto_sync": true,
   "branches": {
-    "Seasons-Visuals": "main"
+    "Seasons-Visuals": "main",
+    "Project-Corestone": "1.1-main",
+    "Ultra-Shadows-Multipack": "main",
+    "Vibrant-Realism-PBR": "main"
   },
   "proj_cfg": {
     "Vibrant-Realism-PBR": {
@@ -29,5 +32,6 @@
       ],
       "show_regolith": false
     }
-  }
+  },
+  "skip_first_sync_warning": true
 }

@@ -5,7 +5,8 @@ Pack Sync — Live-sync Minecraft Bedrock pack repos to com.mojang
 • Branch-change guard  •  System tray  •  Windows / macOS / Linux
 """
 import io, json, os, re, shlex, shutil, struct, subprocess, sys
-import threading, zlib
+import threading, time, zlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -14,6 +15,13 @@ IS_WIN   = sys.platform == "win32"
 IS_MAC   = sys.platform == "darwin"
 IS_LINUX = sys.platform.startswith("linux")
 _NO_WIN  = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW — suppress console flashes
+
+# ── App version + self-update (GitHub Releases) ──────────────────────────────
+# APP_VERSION must match the release tag (release tags are "pack-sync-v<APP_VERSION>").
+# Bump this in lock-step with release_pack_sync.py when cutting a release.
+APP_VERSION   = "1.0.0"
+UPDATE_REPO   = "Queuereel/PixelArtTexture-Generator"  # where releases are published
+UPDATE_TAG_PREFIX = "pack-sync-v"
 
 if IS_WIN:
     import ctypes, ctypes.wintypes, winreg
@@ -1630,6 +1638,144 @@ def git_head_sha(repo: Path) -> str | None:
         return r.stdout.strip() if r.returncode == 0 else None
     except: return None
 
+# ─── Self-update (download prebuilt release binary) ──────────────────────────
+# Pack Sync updates by downloading the prebuilt binary from the latest GitHub
+# Release (no git, no recompile — the distributed .exe can't rebuild itself).
+# Flow: query the Releases API → compare versions → download the asset for this
+# platform → swap it in next to the running exe → ask the user to restart.
+
+def _version_tuple(v: str) -> tuple:
+    """'1.2.10' -> (1, 2, 10). Non-numeric parts compare as 0. Never raises."""
+    out = []
+    for part in re.split(r"[.\-+]", v.strip()):
+        m = re.match(r"\d+", part)
+        out.append(int(m.group()) if m else 0)
+    return tuple(out) or (0,)
+
+def _running_exe_path() -> Path | None:
+    """Path to the running PackSync executable, or None if running from source
+    (not frozen) — in which case download-updates don't apply."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
+    return None
+
+def _platform_slug() -> str:
+    """The release-asset slug for the running OS + CPU arch, matching the names
+    produced by the CI workflow (e.g. 'windows-x64', 'windows-arm64',
+    'macos-arm64', 'macos-x64', 'linux-x64')."""
+    import platform
+    machine = platform.machine().lower()
+    is_arm  = machine in ("arm64", "aarch64")
+    if IS_WIN:   return "windows-arm64" if is_arm else "windows-x64"
+    if IS_MAC:   return "macos-arm64"   if is_arm else "macos-x64"
+    if IS_LINUX: return "linux-x64"
+    return ""
+
+def _platform_asset_match(name: str) -> bool:
+    """True if a release asset filename is the right artifact for this OS *and*
+    CPU arch. Assets are named per-arch (e.g. PackSync-windows-arm64.exe), so we
+    match the slug to avoid handing an x64 user the ARM64 build or vice-versa."""
+    n = name.lower()
+    slug = _platform_slug()
+    if not slug:
+        return False
+    ext = {".exe", ".dmg", ".deb"}
+    has_ext = any(n.endswith(e) for e in ext)
+    return slug in n and has_ext
+
+def _http_get_json(url: str, timeout: int = 20):
+    import urllib.request
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "PackSync-Updater",
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+def check_for_app_update() -> tuple[bool, str, dict | None]:
+    """Query the latest GitHub Release. Returns (update_available, message, info).
+    `info` carries {'version', 'tag', 'asset_url', 'asset_name'} when an update is
+    available. Never raises."""
+    import urllib.error
+    try:
+        try:
+            data = _http_get_json(
+                f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest")
+        except urllib.error.HTTPError as he:
+            # 404 = the repo has no published 'latest' release yet. Not an error
+            # from the user's perspective — just nothing to update to.
+            if he.code == 404:
+                return (False, "no releases published yet", None)
+            raise
+        tag = data.get("tag_name", "")
+        latest = tag[len(UPDATE_TAG_PREFIX):] if tag.startswith(UPDATE_TAG_PREFIX) else tag
+        if not latest:
+            return (False, "no released version found", None)
+        if _version_tuple(latest) <= _version_tuple(APP_VERSION):
+            return (False, f"up to date (v{APP_VERSION})", None)
+        asset = next((a for a in data.get("assets", [])
+                      if _platform_asset_match(a.get("name", ""))), None)
+        if not asset:
+            return (False, f"v{latest} available but no build for this platform", None)
+        return (True, f"v{latest} available (you have v{APP_VERSION})", {
+            "version": latest, "tag": tag,
+            "asset_url": asset["browser_download_url"],
+            "asset_name": asset["name"],
+        })
+    except Exception as e:
+        return (False, f"check error: {e}", None)
+
+def _download(url: str, dest: Path, timeout: int = 600):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "PackSync-Updater"})
+    with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
+        shutil.copyfileobj(r, f)
+
+def apply_app_update(info: dict, log=lambda *_: None) -> tuple[bool, str]:
+    """Download the release asset and swap it in next to the running exe.
+    Returns (ok, message). Windows can't overwrite a running exe, so we rename
+    the current one to *.old (cleaned up on next launch) and move the new one in."""
+    exe = _running_exe_path()
+    if exe is None:
+        return (False, "self-update only works for the packaged build, not source")
+    try:
+        # On macOS the asset is a .dmg and on Linux a .deb — we can't hot-swap a
+        # running app bundle / system package safely, so just download it and
+        # point the user at it rather than attempting an in-place swap.
+        new_dir = exe.parent
+        if not IS_WIN:
+            out = new_dir / info["asset_name"]
+            log(f"Downloading {info['asset_name']}…")
+            _download(info["asset_url"], out)
+            return (True, f"downloaded to {out} — install it to finish updating")
+
+        tmp = new_dir / (exe.name + ".new")
+        log(f"Downloading v{info['version']}…")
+        _download(info["asset_url"], tmp)
+        if tmp.stat().st_size < 1024:
+            tmp.unlink(missing_ok=True)
+            return (False, "downloaded file looks corrupt (too small)")
+        old = new_dir / (exe.name + ".old")
+        old.unlink(missing_ok=True)
+        log("Installing update…")
+        os.replace(exe, old)          # move running exe aside (allowed while running)
+        os.replace(tmp, exe)          # put new exe in place
+        return (True, f"updated to v{info['version']} — restart Pack Sync to use it")
+    except Exception as e:
+        return (False, f"update error: {e}")
+
+def _cleanup_old_update():
+    """Remove a leftover *.old binary from a previous update. Best-effort."""
+    exe = _running_exe_path()
+    if exe is None:
+        return
+    try:
+        old = exe.parent / (exe.name + ".old")
+        if old.exists():
+            old.unlink()
+    except Exception:
+        pass
+
 # ─── Pack detection ───────────────────────────────────────────────────────────
 def clean_name(raw: str) -> str:
     return "".join(p.capitalize() for p in re.split(r"[-_\s]+", raw) if p)
@@ -1734,25 +1880,132 @@ def discover_projects(github_dir: Path) -> list[dict]:
 # ─── Sync helpers ─────────────────────────────────────────────────────────────
 _TOL = 2  # mtime tolerance in seconds
 
-def _copy_if_newer(src: Path, dst: Path, log=None):
-    if not dst.exists() or src.stat().st_mtime > dst.stat().st_mtime + _TOL:
+def _needs_copy(src: Path, dst: Path) -> bool:
+    """True if dst is missing or older than src. One stat() per side, no extra
+    exists() call (we treat a stat failure on dst as 'missing')."""
+    try:
+        s_m = src.stat().st_mtime
+    except OSError:
+        return False
+    try:
+        d_m = dst.stat().st_mtime
+    except OSError:
+        return True  # dst missing
+    return s_m > d_m + _TOL
+
+def _copy_if_newer(src: Path, dst: Path, log=None) -> bool:
+    """Copy src→dst if newer. Returns True if a copy happened."""
+    if _needs_copy(src, dst):
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         if log: log(f"→ {src.name}")
+        return True
+    return False
+
+# Worker count for parallel copies. File I/O to com.mojang is I/O-bound and
+# shutil.copy2 / os.stat release the GIL, so threads give a real speedup.
+_SYNC_WORKERS = min(32, (os.cpu_count() or 4) * 4)
 
 def sync_bidir(src: Path, dst: Path, log=None, progress_cb=None):
     dst.mkdir(parents=True, exist_ok=True)
     pairs = [(f, dst / f.relative_to(src)) for f in src.rglob("*")
              if f.is_file() and "node_modules" not in f.parts]
     total = len(pairs)
-    for i, (s, d) in enumerate(pairs):
-        _copy_if_newer(s, d, log)
-        if progress_cb and total:
-            progress_cb(i + 1, total)
+    if not total:
+        if progress_cb: progress_cb(0, 0)
+        return
+
+    done = 0
+    done_lock = threading.Lock()
+    last_emit = [0.0]
+    _PROG_INTERVAL = 0.033  # ~30 UI updates/sec, regardless of file count
+
+    def _emit(force=False):
+        # Throttle progress reporting: per-file UI marshaling (25k+ files) is
+        # what made syncs crawl. Report at most ~30x/sec, plus a final 100%.
+        if not progress_cb:
+            return
+        now = time.monotonic()
+        if force or now - last_emit[0] >= _PROG_INTERVAL:
+            last_emit[0] = now
+            progress_cb(done, total)
+
+    # NOTE: workers must not touch the log callback — _status touches Tkinter
+    # directly and is not safe to call from multiple threads. Per-file logging
+    # at 25k files was pure noise/overhead anyway. Progress goes through
+    # progress_cb, which marshals to the UI thread via .after() and is safe.
+    errors: list[str] = []
+    err_lock = threading.Lock()
+
+    def _work(pair):
+        nonlocal done
+        s, d = pair
+        try:
+            _copy_if_newer(s, d, log=None)
+        except Exception as e:
+            with err_lock:
+                errors.append(f"{s.name}: {e}")
+        with done_lock:
+            done += 1
+        _emit()
+
+    with ThreadPoolExecutor(max_workers=_SYNC_WORKERS) as ex:
+        list(ex.map(_work, pairs))
+    _emit(force=True)
+    if errors and log:
+        log(f"{len(errors)} copy error(s); first: {errors[0]}")
 
 def dest_path(mojang: Path, proj: dict, pack_type: str) -> Path:
     sub = "development_resource_packs" if pack_type=="RP" else "development_behavior_packs"
     return mojang / sub / f"{proj['clean']}{pack_type}"
+
+# ─── Version bump (Regolith-style apply_version) ─────────────────────────────
+# Mirrors the apply_version filter: a persistent counter lives in
+# data/bump_manifest/version.json (build data, never shipped to com.mojang).
+# On each sync we bump the last component and stamp the new version into the
+# manifests that were copied to com.mojang — the SOURCE manifests stay clean.
+
+def _bump_manifest_version_file(repo: Path) -> list[int] | None:
+    """Increment data/bump_manifest/version.json's last component and return the
+    new [major, minor, patch]. Returns None if the repo has no version ledger."""
+    vfile = repo / "packs" / "data" / "bump_manifest" / "version.json"
+    if not vfile.exists():
+        # Also accept dataPath-relative location already resolved by caller via
+        # proj["regolith"]["data_path"]; caller passes repo, default layout here.
+        return None
+    try:
+        data = json.loads(vfile.read_text(encoding="utf-8"))
+        ver  = data.get("version")
+        if not (isinstance(ver, list) and len(ver) >= 1):
+            return None
+        ver[-1] = int(ver[-1]) + 1
+        data["version"] = ver
+        vfile.write_text(json.dumps(data, indent=4), encoding="utf-8")
+        return ver
+    except Exception:
+        return None
+
+def _stamp_manifest(manifest_path: Path, version: list[int]) -> bool:
+    """Write `version` into a manifest's header, resources/data modules, and any
+    dependency that has a uuid. Returns True on success. (Same fields as the
+    apply_version filter's update_manifest.)"""
+    try:
+        m = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if "header" in m and isinstance(m["header"], dict):
+        m["header"]["version"] = version
+    for module in m.get("modules", []):
+        if isinstance(module, dict) and module.get("type") in {"resources", "data"}:
+            module["version"] = version
+    for dep in m.get("dependencies", []):
+        if isinstance(dep, dict) and dep.get("uuid") is not None:
+            dep["version"] = version
+    try:
+        manifest_path.write_text(json.dumps(m, indent=4), encoding="utf-8")
+        return True
+    except Exception:
+        return False
 
 # ─── OS-native file watcher (Windows) ────────────────────────────────────────
 # ReadDirectoryChangesW — zero-dependency, zero idle CPU.
@@ -2437,6 +2690,7 @@ class App(tk.Tk):
         self.title("Pack Sync")
         self.minsize(560, 400); self.configure(bg=BG)
         self.protocol("WM_DELETE_WINDOW", self._hide)
+        _cleanup_old_update()  # remove leftover *.old binary from a prior update
         self.cfg        = load_cfg()
         self._tray      = None
         self._toast_mgr = ToastManager(self)
@@ -2472,6 +2726,27 @@ class App(tk.Tk):
                     self._win_set_taskbar(visible=False)
             elif not self.cfg.get("intro_seen"):
                 self.after(200, self._show_intro)
+            # First run after this feature ships: ask once whether to enable
+            # automatic update checking. Then run the check on every startup if on.
+            self.after(400, self._prompt_auto_update_once)
+            self.after(1500, self._maybe_check_update)
+
+    def _prompt_auto_update_once(self):
+        """Ask the user (once) whether Pack Sync may check for updates. Default
+        is ON. Stored in cfg['auto_update']; toggle later in Settings."""
+        if self.cfg.get("auto_update_prompted"):
+            return
+        self.cfg["auto_update_prompted"] = True
+        enable = messagebox.askyesno(
+            "Automatic updates",
+            "Allow Pack Sync to check for updates on startup and install the "
+            "latest version automatically (downloaded from GitHub Releases)?\n\n"
+            "You can change this anytime in Settings.",
+            default=messagebox.YES)
+        self.cfg["auto_update"] = bool(enable)
+        save_cfg(self.cfg)
+        if enable:
+            self._maybe_check_update()
 
     def _set_window_icon(self):
         # On Windows, iconbitmap(.ico) is the most reliable method
@@ -3139,10 +3414,56 @@ class App(tk.Tk):
         partial mid-pull state, then resume the watchers."""
         def _run():
             try:
+                # Post-pull full sync = a "build/export", so it bumps the version
+                # (same as the manual Sync button — see _sync_one).
                 self._sync_one(proj, silent=True)
             finally:
                 self._watchers.resume_packs(proj["name"])
         threading.Thread(target=_run, daemon=True).start()
+
+    # ── Self-update (download prebuilt release) ───────────────────────────────
+    def _maybe_check_update(self, manual=False):
+        """Kick off a background update check if enabled (or if manual). Safe to
+        call from the UI thread; all network/IO happens off-thread."""
+        if not manual and not self.cfg.get("auto_update", False):
+            return
+        if _running_exe_path() is None:
+            if manual:
+                self.after(0, lambda: messagebox.showinfo(
+                    "Update",
+                    "Self-update applies to the packaged Pack Sync build. "
+                    "You're running from source — pull with git instead."))
+            return
+        if getattr(self, "_update_running", False):
+            return
+        self._update_running = True
+        threading.Thread(target=self._do_update, args=(manual,),
+                         daemon=True).start()
+
+    def _do_update(self, manual: bool):
+        try:
+            self.after(0, lambda: self._status("Checking for updates…"))
+            available, msg, info = check_for_app_update()
+            if not available:
+                if manual:
+                    self.after(0, lambda m=msg: messagebox.showinfo(
+                        "Update", f"Pack Sync: {m}."))
+                self.after(0, lambda m=msg: self._status(f"Update: {m}"))
+                return
+            # If automatic, only prompt-then-install when the user opted in;
+            # auto_update means "install automatically", so go ahead silently.
+            ok, result = apply_app_update(
+                info, log=lambda m: self.after(0, lambda mm=m: self._status(mm)))
+            self.after(0, lambda r=result, k=ok: self._status(
+                ("✓ " if k else "✕ ") + r))
+            if ok:
+                self.after(0, lambda r=result: messagebox.showinfo(
+                    "Pack Sync updated", r))
+            elif manual:
+                self.after(0, lambda r=result: messagebox.showwarning(
+                    "Update", r))
+        finally:
+            self._update_running = False
 
     def _handle_branch_dlg(self, proj: dict, old: str, new: str):
         if self.cfg.get("auto_sync"):
@@ -3185,6 +3506,21 @@ class App(tk.Tk):
             if not self._run_on_main(self._check_branch, proj): return
         pairs      = self._get_sync_pairs(proj)
         names, errs = [], []
+
+        # Version bump, the way Regolith does it: apply_version is a filter that
+        # runs on every build/export — it doesn't look at git at all. The
+        # equivalent of "a build happened" here is a full sync to com.mojang,
+        # i.e. the manual Sync button OR a post-pull sync (both land here). Live
+        # per-file edits are not a full build, so they don't bump (handled by the
+        # watcher path, which never calls this). Bumps the persistent counter
+        # once, stamps each pack's com.mojang manifest after copy; source
+        # manifests stay clean and the bump_manifest ledger is never shipped.
+        bumped_version = None
+        if self.cfg.get("auto_version_bump", True):
+            bumped_version = _bump_manifest_version_file(proj["path"])
+            if bumped_version is not None:
+                self._status(f"Version → {'.'.join(map(str, bumped_version))}")
+
         for label, src, dst in pairs:
             bar_key = f"{proj['name']}:{label}"
             toast   = self._run_on_main(self._toast_mgr.show,
@@ -3201,6 +3537,19 @@ class App(tk.Tk):
                         t.set_progress(d, tt)
                     _sp.after(0, _ui)
                 sync_bidir(src, dst, self._status, progress_cb=_prog)
+
+                # Stamp the bumped version into the COPIED manifest (com.mojang),
+                # leaving the source manifest untouched. Also make sure the
+                # bump_manifest ledger never lands in the shipped pack.
+                if bumped_version is not None:
+                    dst_manifest = dst / "manifest.json"
+                    if dst_manifest.exists():
+                        _stamp_manifest(dst_manifest, bumped_version)
+                    stray = dst / "data" / "bump_manifest"
+                    if stray.exists():
+                        try: shutil.rmtree(stray, ignore_errors=True)
+                        except Exception: pass
+
                 for flt in self.cfg.get("regolith_filters", []):
                     if flt.get("enabled", True) and flt.get("cmd", "").strip():
                         self._status(f"Filter: {flt.get('name', flt['cmd'])}…")
@@ -3304,6 +3653,9 @@ class App(tk.Tk):
 
     # ── Watcher flush toast (called from background thread) ───────────────────
     def _on_watcher_flush(self, proj_name: str, pack_type: str, stats: dict):
+        # NOTE: live edits do NOT bump the version on purpose — saving a texture
+        # locally shouldn't churn the version. The version is only bumped when a
+        # new commit is pulled from GitHub (see _on_pull_detected).
         overwritten = stats.get("overwritten", set())
         new_files   = stats.get("new", set())
         deleted     = stats.get("deleted", set())
@@ -4142,6 +4494,18 @@ class SettingsDialog(tk.Toplevel):
                        variable=self._sv, bg=BG, fg=TEXT, selectcolor=SURFACE,
                        activebackground=BG, activeforeground=TEXT,
                        font=(UI_FONT,10)).pack(anchor="w", padx=28, pady=8)
+        # Auto-update toggle + manual "check now"
+        self._auv = tk.BooleanVar(value=self._cfg.get("auto_update", False))
+        au_row = tk.Frame(self, bg=BG); au_row.pack(fill=tk.X, padx=28, pady=(0,4))
+        tk.Checkbutton(au_row,
+                       text="Check for Pack Sync updates on startup (auto-install)",
+                       variable=self._auv, bg=BG, fg=TEXT, selectcolor=SURFACE,
+                       activebackground=BG, activeforeground=TEXT,
+                       font=(UI_FONT,10)).pack(side=tk.LEFT)
+        tk.Button(au_row, text="Check now",
+                  command=lambda: self.master._maybe_check_update(manual=True),
+                  bg=SURF2, fg=TEXT, relief=tk.FLAT, padx=10, pady=2,
+                  font=(UI_FONT,9), cursor="hand2").pack(side=tk.RIGHT)
         # Language selector
         lang_row = tk.Frame(self, bg=BG); lang_row.pack(fill=tk.X, padx=28, pady=4)
         tk.Label(lang_row, text=t("settings_language"), bg=BG, fg=TEXT,
@@ -4246,7 +4610,8 @@ class SettingsDialog(tk.Toplevel):
                     "enabled": r["enabled"].get()}
                    for r in self._filter_rows if r["cmd"].get().strip()]
         self.result = {"github_dir": self._gv.get(), "mojang_dir": self._dv.get(),
-                       "language": sel_code, "regolith_filters": filters}
+                       "language": sel_code, "regolith_filters": filters,
+                       "auto_update": self._auv.get()}
         self.destroy()
 
 
