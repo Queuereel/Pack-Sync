@@ -31,6 +31,8 @@ jobs:
             --exclude-module PIL.ImageEnhance `
             --exclude-module PIL.ImageTk `
             --exclude-module PIL.ImageQt `
+            --hidden-import ssl `
+            --hidden-import _ssl `
             pack_sync.py
       - name: Compile TrayHelper.exe
         run: |
@@ -74,6 +76,8 @@ jobs:
             --exclude-module PIL.ImageEnhance `
             --exclude-module PIL.ImageTk `
             --exclude-module PIL.ImageQt `
+            --hidden-import ssl `
+            --hidden-import _ssl `
             pack_sync.py
       - name: Compile TrayHelper.exe
         run: |
@@ -122,6 +126,8 @@ jobs:
             --exclude-module PIL.ImageEnhance \
             --exclude-module PIL.ImageTk \
             --exclude-module PIL.ImageQt \
+            --hidden-import ssl \
+            --hidden-import _ssl \
             pack_sync.py
       - name: Create DMG
         run: |
@@ -164,6 +170,8 @@ jobs:
             --exclude-module PIL.ImageEnhance \
             --exclude-module PIL.ImageTk \
             --exclude-module PIL.ImageQt \
+            --hidden-import ssl \
+            --hidden-import _ssl \
             pack_sync.py
       - name: Create .deb
         run: |

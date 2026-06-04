@@ -159,6 +159,10 @@ cmd = [
     "--exclude-module", "PIL.ImageSequence",
     "--exclude-module", "PIL.GifImagePlugin",
     "--exclude-module", "PIL.JpegImagePlugin",
+    # Needed for the self-updater's HTTPS calls — PyInstaller misses ssl/_ssl
+    # because the app imports urllib lazily, not ssl directly.
+    "--hidden-import", "ssl",
+    "--hidden-import", "_ssl",
 ]
 
 if PLAT == "win32":
