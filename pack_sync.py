@@ -19,7 +19,7 @@ _NO_WIN  = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW — suppress console 
 # ── App version + self-update (GitHub Releases) ──────────────────────────────
 # APP_VERSION must match the release tag (release tags are "pack-sync-v<APP_VERSION>").
 # Bump this in lock-step with release_pack_sync.py when cutting a release.
-APP_VERSION   = "1.0.4"
+APP_VERSION   = "1.0.5"
 UPDATE_REPO   = "Queuereel/Pack-Sync"  # where releases are published
 UPDATE_TAG_PREFIX = "pack-sync-v"
 
@@ -1987,54 +1987,6 @@ def dest_path(mojang: Path, proj: dict, pack_type: str) -> Path:
     sub = "development_resource_packs" if pack_type=="RP" else "development_behavior_packs"
     return mojang / sub / f"{proj['clean']}{pack_type}"
 
-# ─── Version bump (Regolith-style apply_version) ─────────────────────────────
-# Mirrors the apply_version filter: a persistent counter lives in
-# data/bump_manifest/version.json (build data, never shipped to com.mojang).
-# On each sync we bump the last component and stamp the new version into the
-# manifests that were copied to com.mojang — the SOURCE manifests stay clean.
-
-def _read_manifest_version(repo: Path) -> list[int] | None:
-    """READ the current version from data/bump_manifest/version.json. Returns the
-    [major, minor, patch] list, or None if there's no ledger.
-
-    We deliberately do NOT increment or write this file: the repo's own GitHub
-    Action owns the version bump and commits it. Pack Sync only reads the current
-    value and stamps it into the com.mojang manifests, so it never creates a
-    spurious local change that fights the Action."""
-    vfile = repo / "packs" / "data" / "bump_manifest" / "version.json"
-    if not vfile.exists():
-        return None
-    try:
-        data = json.loads(vfile.read_text(encoding="utf-8"))
-        ver  = data.get("version")
-        if not (isinstance(ver, list) and len(ver) >= 1):
-            return None
-        return ver
-    except Exception:
-        return None
-
-def _stamp_manifest(manifest_path: Path, version: list[int]) -> bool:
-    """Write `version` into a manifest's header, resources/data modules, and any
-    dependency that has a uuid. Returns True on success. (Same fields as the
-    apply_version filter's update_manifest.)"""
-    try:
-        m = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    if "header" in m and isinstance(m["header"], dict):
-        m["header"]["version"] = version
-    for module in m.get("modules", []):
-        if isinstance(module, dict) and module.get("type") in {"resources", "data"}:
-            module["version"] = version
-    for dep in m.get("dependencies", []):
-        if isinstance(dep, dict) and dep.get("uuid") is not None:
-            dep["version"] = version
-    try:
-        manifest_path.write_text(json.dumps(m, indent=4), encoding="utf-8")
-        return True
-    except Exception:
-        return False
-
 # ─── OS-native file watcher (Windows) ────────────────────────────────────────
 # ReadDirectoryChangesW — zero-dependency, zero idle CPU.
 if IS_WIN:
@@ -3563,18 +3515,6 @@ class App(tk.Tk):
         pairs      = self._get_sync_pairs(proj)
         names, errs = [], []
 
-        # Version stamping: the repo's own GitHub Action owns the version bump
-        # (it increments data/bump_manifest/version.json and commits it). Pack
-        # Sync must NOT touch that file, or it creates a spurious local change
-        # that conflicts with the Action. So we only READ the current version and
-        # stamp it into the com.mojang manifests after copy — never write back to
-        # the source. The bump_manifest ledger is also never shipped.
-        bumped_version = None
-        if self.cfg.get("auto_version_bump", True):
-            bumped_version = _read_manifest_version(proj["path"])
-            if bumped_version is not None:
-                self._status(f"Version {'.'.join(map(str, bumped_version))}")
-
         for label, src, dst in pairs:
             bar_key = f"{proj['name']}:{label}"
             toast   = self._run_on_main(self._toast_mgr.show,
@@ -3591,18 +3531,6 @@ class App(tk.Tk):
                         t.set_progress(d, tt)
                     _sp.after(0, _ui)
                 sync_bidir(src, dst, self._status, progress_cb=_prog)
-
-                # Stamp the bumped version into the COPIED manifest (com.mojang),
-                # leaving the source manifest untouched. Also make sure the
-                # bump_manifest ledger never lands in the shipped pack.
-                if bumped_version is not None:
-                    dst_manifest = dst / "manifest.json"
-                    if dst_manifest.exists():
-                        _stamp_manifest(dst_manifest, bumped_version)
-                    stray = dst / "data" / "bump_manifest"
-                    if stray.exists():
-                        try: shutil.rmtree(stray, ignore_errors=True)
-                        except Exception: pass
 
                 for flt in self.cfg.get("regolith_filters", []):
                     if flt.get("enabled", True) and flt.get("cmd", "").strip():
