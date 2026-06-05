@@ -19,7 +19,7 @@ _NO_WIN  = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW — suppress console 
 # ── App version + self-update (GitHub Releases) ──────────────────────────────
 # APP_VERSION must match the release tag (release tags are "pack-sync-v<APP_VERSION>").
 # Bump this in lock-step with release_pack_sync.py when cutting a release.
-APP_VERSION   = "1.1.1"
+APP_VERSION   = "1.1.2"
 UPDATE_REPO   = "Queuereel/Pack-Sync"  # where releases are published
 UPDATE_TAG_PREFIX = "pack-sync-v"
 
@@ -2380,17 +2380,16 @@ class WatcherManager:
             pull_lock = threading.Lock()
 
             def _settle_and_pull():
-                # Pull has settled. Re-check SHA. If it moved, run the full
-                # silent sync via pull_cb.
-                #
-                # If we CAN'T confirm the SHA moved, we used to just resume the
-                # paused pack watchers — but that loses the pull's files: while
-                # paused, every per-file change event was dropped, and modern
-                # git often updates refs via packed-refs / logs that our loose
-                # ref watcher doesn't always catch, so the SHA read can miss a
-                # real move. So in the unconfirmed case we now ALSO do a full
-                # re-mirror (Regolith-style: when unsure, just re-sync). It's
-                # mtime-gated and cheap when nothing actually changed.
+                # Git activity has settled. Re-read HEAD's SHA and only run the
+                # full sync if the commit ACTUALLY moved (a real pull / merge /
+                # commit / reset). Routine .git writes — `git status`, an IDE's
+                # git integration polling, `git gc`, an index refresh — rewrite
+                # .git/index without changing the commit, and must NOT trigger a
+                # sync. Previously we re-synced "whenever a pull may have landed"
+                # even on an unconfirmed move; combined with the destructive
+                # wipe-and-reupload that produced spurious full re-syncs of packs
+                # the user never touched. SHA-gating is the correct signal: every
+                # real commit move changes the SHA; incidental index writes don't.
                 moved = False
                 try:
                     sha_now = git_head_sha(proj["path"])
@@ -2399,20 +2398,22 @@ class WatcherManager:
                         last_sha[0] = sha_now
                 except Exception:
                     pass
+                if not moved:
+                    # No commit change — nothing to sync. Just resume watching.
+                    for pw in pack_watchers:
+                        pw.resume()
+                    return
                 if self._pull_cb:
-                    # pull_cb runs the full silent sync and owns resume(). Run it
-                    # whenever a pull may have landed, not only on a confirmed SHA
-                    # move, so unconfirmed pulls still reach Mojang.
+                    # pull_cb runs the full silent sync and owns resume().
                     try: self._pull_cb(proj)
                     except Exception as e:
                         self._log(f"pull sync err: {e}")
                     return
                 # No pull_cb wired: re-mirror each pack ourselves, then resume.
-                if moved:
-                    for pw in pack_watchers:
-                        try: mirror_clean(pw.src, pw.dst, self._log)
-                        except Exception as e:
-                            self._log(f"pull resync err: {e}")
+                for pw in pack_watchers:
+                    try: mirror_clean(pw.src, pw.dst, self._log)
+                    except Exception as e:
+                        self._log(f"pull resync err: {e}")
                 for pw in pack_watchers:
                     pw.resume()
 
