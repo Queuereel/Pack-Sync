@@ -4,7 +4,7 @@ Pack Sync — Live-sync Minecraft Bedrock pack repos to com.mojang
 • Instant file-watching (OS-native, zero idle CPU)
 • Branch-change guard  •  System tray  •  Windows / macOS / Linux
 """
-import io, json, os, re, shlex, shutil, struct, subprocess, sys
+import io, json, os, re, shlex, shutil, stat, struct, subprocess, sys
 import threading, time, zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -19,7 +19,7 @@ _NO_WIN  = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW — suppress console 
 # ── App version + self-update (GitHub Releases) ──────────────────────────────
 # APP_VERSION must match the release tag (release tags are "pack-sync-v<APP_VERSION>").
 # Bump this in lock-step with release_pack_sync.py when cutting a release.
-APP_VERSION   = "1.1.0"
+APP_VERSION   = "1.1.1"
 UPDATE_REPO   = "Queuereel/Pack-Sync"  # where releases are published
 UPDATE_TAG_PREFIX = "pack-sync-v"
 
@@ -236,6 +236,47 @@ CONFIG_FILE = (Path(sys.executable).parent if getattr(sys, "frozen", False)
                else Path(__file__).parent) / "pack_sync_config.json"
 APP_NAME    = "PackSync"
 RUN_KEY     = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+# ─── Single-instance guard ────────────────────────────────────────────────────
+# Pack Sync watches the filesystem and writes into com.mojang; two instances
+# would race each other (duplicate watchers, conflicting wipe-and-reupload).
+# Enforce exactly one running instance per user. Windows: a named mutex (lives
+# for the life of the holding process, released automatically on exit/crash).
+# macOS/Linux: an exclusive flock on a lockfile (also auto-released on exit).
+_INSTANCE_HANDLE = None  # keep the OS handle/fd alive for the whole process
+
+def acquire_single_instance() -> bool:
+    """Return True if we are the only instance; False if one is already running.
+    The acquired handle is parked in a module global so it is never GC'd (which
+    would release the lock) for the lifetime of the process."""
+    global _INSTANCE_HANDLE
+    if IS_WIN:
+        import ctypes
+        ERROR_ALREADY_EXISTS = 183
+        # Per-user, session-spanning name. Global\ would block across users; we
+        # only want to block this user's second launch.
+        name = f"Local\\{APP_NAME}_single_instance_mutex"
+        h = ctypes.windll.kernel32.CreateMutexW(None, False, name)
+        last = ctypes.windll.kernel32.GetLastError()
+        if not h:
+            return True  # couldn't create the mutex — fail open, don't block app
+        if last == ERROR_ALREADY_EXISTS:
+            ctypes.windll.kernel32.CloseHandle(h)
+            return False
+        _INSTANCE_HANDLE = h
+        return True
+    else:
+        import fcntl, tempfile
+        lock_path = Path(tempfile.gettempdir()) / f"{APP_NAME}.lock"
+        try:
+            fd = open(lock_path, "w")
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        except Exception:
+            return True  # lock mechanism unavailable — fail open
+        _INSTANCE_HANDLE = fd  # held open = lock held; closes/releases on exit
+        return True
 
 # ─── Palette ──────────────────────────────────────────────────────────────────
 BG=      "#1e1e2e"; BG2=    "#181825"; SURFACE="#313244"; SURF2=  "#45475a"
@@ -1779,7 +1820,12 @@ def apply_app_update(info: dict, log=lambda *_: None) -> tuple[bool, str]:
                 return (False, "update zip did not contain PackSync.exe")
             log("Installing update…")
             old = new_dir / (exe.name + ".old")
-            old.unlink(missing_ok=True)
+            # Clear any stale *.old from a previous update. Deleting it can fail
+            # with WinError 5 if it's still locked (old process holding it) or has
+            # a restrictive ACL. Windows allows *renaming* a file you can't
+            # delete, so fall back to shoving it aside under a unique name — the
+            # next _cleanup_old_update sweep will retry removing those.
+            _retire_stale(old, new_dir, exe.name, log)
             os.replace(exe, old)              # move running exe aside
             shutil.copy2(new_exe, exe)        # install new exe under existing name
             helper = extracted.get("TrayHelper.exe") or next(
@@ -1792,17 +1838,57 @@ def apply_app_update(info: dict, log=lambda *_: None) -> tuple[bool, str]:
     except Exception as e:
         return (False, f"update error: {e}")
 
+def _retire_stale(old: Path, new_dir: Path, exe_name: str, log=None):
+    """Make `old` available as a rename target by clearing whatever is there.
+
+    Plain unlink() can raise WinError 5 (access denied) when the stale file is
+    locked or read-only. We try, in order: clear the read-only bit + unlink,
+    then — if that still fails — rename the stale file to a unique
+    `<exe>.old.<n>.stale` name (Windows permits renaming files it won't let you
+    delete). Either way `old` ends up free for os.replace() to move into."""
+    if not old.exists():
+        return
+    try:
+        try: os.chmod(old, stat.S_IWRITE)
+        except Exception: pass
+        old.unlink()
+        return
+    except Exception:
+        pass
+    # Couldn't delete it — move it out of the way under a unique name instead.
+    for n in range(1, 1000):
+        alt = new_dir / f"{exe_name}.old.{n}.stale"
+        if alt.exists():
+            continue
+        try:
+            os.replace(old, alt)
+            if log: log(f"stale update file locked; set aside as {alt.name}")
+            return
+        except Exception:
+            continue
+    # Last resort: let the caller's os.replace try anyway (may still succeed).
+    if log: log("warning: could not clear stale .old file")
+
 def _cleanup_old_update():
-    """Remove a leftover *.old binary from a previous update. Best-effort."""
+    """Remove leftover *.old / *.old.N.stale binaries from previous updates.
+    Best-effort: anything still locked is left for a future sweep."""
     exe = _running_exe_path()
     if exe is None:
         return
+    d = exe.parent
+    candidates = [d / (exe.name + ".old")]
     try:
-        old = exe.parent / (exe.name + ".old")
-        if old.exists():
-            old.unlink()
+        candidates += list(d.glob(exe.name + ".old.*.stale"))
     except Exception:
         pass
+    for old in candidates:
+        try:
+            if old.exists():
+                try: os.chmod(old, stat.S_IWRITE)
+                except Exception: pass
+                old.unlink()
+        except Exception:
+            pass
 
 # ─── Pack detection ───────────────────────────────────────────────────────────
 def clean_name(raw: str) -> str:
@@ -4736,5 +4822,36 @@ class HiddenReposDialog(tk.Toplevel):
                         proj, self._app._get_sync_pairs(proj))
 
 
+def _refuse_second_instance():
+    """A Pack Sync instance is already running. Tell the user and exit. We avoid
+    spinning up the full Tk app; a tiny transient popup is enough."""
+    try:
+        warn = tk.Tk(); warn.title("Pack Sync")
+        warn.geometry("360x120"); warn.configure(bg=BG)
+        warn.eval('tk::PlaceWindow . center')
+        tk.Label(warn, text="Pack Sync is already running.",
+                 font=("Segoe UI", 11, "bold"), bg=BG, fg=TEXT).pack(pady=(24, 4))
+        tk.Label(warn, text="Check the system tray.",
+                 font=("Segoe UI", 9), bg=BG, fg=SUB).pack()
+        tk.Button(warn, text="OK", command=warn.destroy, bg=SURF2, fg=TEXT,
+                  relief="flat", padx=24, pady=4).pack(pady=14)
+        warn.after(4000, warn.destroy)
+        warn.mainloop()
+    except Exception:
+        pass
+
 if __name__ == "__main__":
+    # Enforce a single running instance. When relaunched by the self-updater
+    # (--minimized), the old process may not have released its mutex yet, so
+    # retry briefly before giving up rather than refusing a legitimate restart.
+    _retries = 25 if "--minimized" in sys.argv else 1  # ~5s grace on update-restart
+    _got_lock = False
+    for _i in range(_retries):
+        if acquire_single_instance():
+            _got_lock = True
+            break
+        time.sleep(0.2)
+    if not _got_lock:
+        _refuse_second_instance()
+        sys.exit(0)
     App().mainloop()
