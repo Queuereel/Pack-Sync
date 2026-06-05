@@ -19,7 +19,7 @@ _NO_WIN  = 0x08000000 if IS_WIN else 0  # CREATE_NO_WINDOW — suppress console 
 # ── App version + self-update (GitHub Releases) ──────────────────────────────
 # APP_VERSION must match the release tag (release tags are "pack-sync-v<APP_VERSION>").
 # Bump this in lock-step with release_pack_sync.py when cutting a release.
-APP_VERSION   = "1.0.5"
+APP_VERSION   = "1.1.0"
 UPDATE_REPO   = "Queuereel/Pack-Sync"  # where releases are published
 UPDATE_TAG_PREFIX = "pack-sync-v"
 
@@ -1983,6 +1983,68 @@ def sync_bidir(src: Path, dst: Path, log=None, progress_cb=None):
     if errors and log:
         log(f"{len(errors)} copy error(s); first: {errors[0]}")
 
+def mirror_clean(src: Path, dst: Path, log=None, progress_cb=None):
+    """Wipe dst entirely, then copy every file from src fresh.
+
+    Unlike sync_bidir (incremental, mtime-gated, merge — newer-wins), this is a
+    destructive full re-upload: the destination pack folder is deleted and
+    rebuilt to exactly match the repo. Used so that any change landing in the
+    git folder (a pulled/pushed commit, or a local file add/edit) produces a
+    com.mojang pack that is byte-for-byte the repo, with no stale or orphaned
+    files left behind."""
+    # Remove the existing destination so nothing from a previous sync survives.
+    if dst.exists():
+        try:
+            shutil.rmtree(dst)
+        except Exception:
+            try:
+                force_remove(dst)
+            except Exception as e:
+                if log: log(f"wipe failed for {dst.name}: {e}")
+    dst.mkdir(parents=True, exist_ok=True)
+
+    files = [f for f in src.rglob("*")
+             if f.is_file() and "node_modules" not in f.parts]
+    total = len(files)
+    if not total:
+        if progress_cb: progress_cb(0, 0)
+        return
+
+    done = 0
+    done_lock = threading.Lock()
+    last_emit = [0.0]
+    _PROG_INTERVAL = 0.033
+
+    def _emit(force=False):
+        if not progress_cb:
+            return
+        now = time.monotonic()
+        if force or now - last_emit[0] >= _PROG_INTERVAL:
+            last_emit[0] = now
+            progress_cb(done, total)
+
+    errors: list[str] = []
+    err_lock = threading.Lock()
+
+    def _work(s):
+        nonlocal done
+        d = dst / s.relative_to(src)
+        try:
+            d.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(s, d)
+        except Exception as e:
+            with err_lock:
+                errors.append(f"{s.name}: {e}")
+        with done_lock:
+            done += 1
+        _emit()
+
+    with ThreadPoolExecutor(max_workers=_SYNC_WORKERS) as ex:
+        list(ex.map(_work, files))
+    _emit(force=True)
+    if errors and log:
+        log(f"{len(errors)} copy error(s); first: {errors[0]}")
+
 def dest_path(mojang: Path, proj: dict, pack_type: str) -> Path:
     sub = "development_resource_packs" if pack_type=="RP" else "development_behavior_packs"
     return mojang / sub / f"{proj['clean']}{pack_type}"
@@ -2120,7 +2182,7 @@ class _PackWatcher:
         if self._paused:
             return
         try:
-            sync_bidir(self.src, self.dst, self.log_fn)
+            mirror_clean(self.src, self.dst, self.log_fn)
             if self._flush_cb:
                 # Report as a resync so the UI/toast reflects that something landed.
                 try: self._flush_cb({"overwritten": set(), "new": set(),
@@ -2158,32 +2220,24 @@ class _PackWatcher:
         with self._lock:
             paths,     self._q     = set(self._q),     set()
             del_paths, self._del_q = set(self._del_q), set()
-        overwritten: set[Path] = set()
-        new_files:   set[Path] = set()
-        deleted:     set[Path] = set()
-        for p in paths:
-            try:
-                rel   = p.relative_to(self.src)
-                dst_p = self.dst / rel
-                existed = dst_p.exists()
-                will  = not existed or p.stat().st_mtime > dst_p.stat().st_mtime + _TOL
-                _copy_if_newer(p, dst_p, self.log_fn)
-                if will:
-                    (overwritten if existed else new_files).add(p)
-            except Exception as e:
-                self.log_fn(f"watch err: {e}")
-        for p in del_paths:
-            try:
-                dst_p = self.dst / p.relative_to(self.src)
-                if dst_p.exists():
-                    dst_p.unlink()
-                    deleted.add(p)
-                    self.log_fn(f"✕ {p.name}")
-            except Exception as e:
-                self.log_fn(f"watch del: {e}")
-        stats = {"overwritten": overwritten, "new": new_files, "deleted": deleted}
-        if (overwritten or new_files or deleted) and self._flush_cb:
-            try: self._flush_cb(stats)
+        # Any local change (add / edit / delete) in the git folder triggers a
+        # full wipe-and-reupload: the destination is deleted and rebuilt from
+        # the repo so it always matches the source exactly. We no longer do
+        # per-file incremental copies — that left stale/orphaned files behind.
+        if not paths and not del_paths:
+            return
+        if self._paused:
+            return
+        try:
+            mirror_clean(self.src, self.dst, self.log_fn)
+            self.log_fn("⟳ resynced (local change → full re-upload)")
+        except Exception as e:
+            self.log_fn(f"watch resync err: {e}")
+            return
+        if self._flush_cb:
+            # Report as a resync so the UI/toast reflects that something landed.
+            try: self._flush_cb({"overwritten": set(), "new": set(),
+                                 "deleted": set(), "resync": True})
             except Exception: pass
 
 
@@ -2270,7 +2324,7 @@ class WatcherManager:
                 # No pull_cb wired: re-mirror each pack ourselves, then resume.
                 if moved:
                     for pw in pack_watchers:
-                        try: sync_bidir(pw.src, pw.dst, self._log)
+                        try: mirror_clean(pw.src, pw.dst, self._log)
                         except Exception as e:
                             self._log(f"pull resync err: {e}")
                 for pw in pack_watchers:
@@ -3530,7 +3584,9 @@ class App(tk.Tk):
                             if not pb.winfo_ismapped(): pb.pack(fill=tk.X)
                         t.set_progress(d, tt)
                     _sp.after(0, _ui)
-                sync_bidir(src, dst, self._status, progress_cb=_prog)
+                # Wipe-and-reupload: the destination is fully replaced with the
+                # repo's current contents (no merge, no stale files).
+                mirror_clean(src, dst, self._status, progress_cb=_prog)
 
                 for flt in self.cfg.get("regolith_filters", []):
                     if flt.get("enabled", True) and flt.get("cmd", "").strip():
