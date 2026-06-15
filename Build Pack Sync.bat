@@ -14,16 +14,29 @@ echo    Pack Sync Builder ^| Windows x64/ARM64
 echo  ==========================================
 echo.
 
-where python >nul 2>&1
-if %errorlevel% neq 0 (
-    echo  ERROR: Python not found in PATH.
-    echo  Install from https://www.python.org/downloads/
+:: Find a real Python. Bare "python" is avoided on purpose: on this machine it
+:: resolves to the Microsoft Store stub (...\WindowsApps\python.exe), which only
+:: prints "Python was not found" and exits. The py launcher reaches the real
+:: installs. Native ARM64 is preferred, then x64, then whatever py defaults to.
+set "PY="
+for %%P in ("py -V:3.14-arm64" "py -3-64" "py -3" "py") do (
+    if not defined PY (
+        %%~P -c "pass" >nul 2>&1 && set "PY=%%~P"
+    )
+)
+
+if not defined PY (
+    echo  ERROR: No real Python found.
+    echo  The py launcher could not locate a Python install, and bare "python"
+    echo  only finds the Microsoft Store stub.
+    echo  Install Python 3.11+ from https://www.python.org/downloads/windows/
+    echo  ^(or run:  winget install Python.Python.3.14^)
     pause
     exit /b 1
 )
 
 echo  Python found:
-python --version
+%PY% --version
 echo.
 
 :: PyInstaller can't overwrite dist\...\PackSync.exe while it is running.
@@ -35,7 +48,7 @@ echo.
 
 echo  Running build.py ...
 echo.
-python build.py
+%PY% build.py
 
 if %errorlevel% equ 0 (
     echo.

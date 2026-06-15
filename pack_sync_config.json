@@ -2,7 +2,7 @@
   "window_w": 751,
   "window_h": 724,
   "window_x": 468,
-  "window_y": 522,
+  "window_y": 236,
   "project_type": "minecraft",
   "github_dir": "C:\\Users\\Administrator\\Documents\\GitHub",
   "mojang_dir": "C:\\Users\\Administrator\\AppData\\Roaming\\Minecraft Bedrock\\Users\\Shared\\games\\com.mojang",
@@ -33,5 +33,7 @@
       "show_regolith": false
     }
   },
-  "skip_first_sync_warning": true
+  "skip_first_sync_warning": true,
+  "auto_update_prompted": true,
+  "auto_update": true
 }
