@@ -199,34 +199,39 @@ if PLAT == "darwin" and built_app.exists():
     size_mb = dmg.stat().st_size / 1_048_576
     print(f"✓  dist/{folder}/PackSync.dmg  ({size_mb:.1f} MB)")
 
-# ── Linux: wrap in .deb ───────────────────────────────────────────────────────
+# ── Linux: wrap in .deb (Debian/Ubuntu only) ─────────────────────────────────
 elif IS_LINUX := (PLAT == "linux") and built_exe.exists():
-    print("\nBuilding .deb package …")
-    pkg = BUILD_TMP / "deb"
-    for d in ["DEBIAN",
-              "usr/local/bin",
-              "usr/share/applications",
-              "usr/share/icons/hicolor/256x256/apps"]:
-        (pkg / d).mkdir(parents=True, exist_ok=True)
+    size_mb = built_exe.stat().st_size / 1_048_576
+    print(f"\n✓  dist/{folder}/PackSync  ({size_mb:.1f} MB)")
+    if shutil.which("dpkg-deb"):
+        print("\nBuilding .deb package …")
+        pkg = BUILD_TMP / "deb"
+        for d in ["DEBIAN",
+                  "usr/local/bin",
+                  "usr/share/applications",
+                  "usr/share/icons/hicolor/256x256/apps"]:
+            (pkg / d).mkdir(parents=True, exist_ok=True)
 
-    (pkg / "DEBIAN" / "control").write_text(
-        "Package: pack-sync\n"
-        "Version: 1.0\n"
-        "Architecture: amd64\n"
-        "Maintainer: Queuereel\n"
-        "Description: Pack Sync - Live-sync Minecraft Bedrock repos to com.mojang\n"
-    )
-    shutil.copy2(built_exe, pkg / "usr" / "local" / "bin" / "PackSync")
-    os.chmod(pkg / "usr" / "local" / "bin" / "PackSync", 0o755)
-    (pkg / "usr" / "share" / "applications" / "pack-sync.desktop").write_text(
-        "[Desktop Entry]\nName=Pack Sync\n"
-        "Exec=/usr/local/bin/PackSync\nType=Application\n"
-        "Categories=Utility;\n"
-    )
-    deb = DIST / "PackSync.deb"
-    subprocess.run(["dpkg-deb", "--build", str(pkg), str(deb)], check=True)
-    size_mb = deb.stat().st_size / 1_048_576
-    print(f"✓  dist/{folder}/PackSync.deb  ({size_mb:.1f} MB)")
+        (pkg / "DEBIAN" / "control").write_text(
+            "Package: pack-sync\n"
+            "Version: 1.0\n"
+            "Architecture: amd64\n"
+            "Maintainer: Queuereel\n"
+            "Description: Pack Sync - Live-sync Minecraft Bedrock repos to com.mojang\n"
+        )
+        shutil.copy2(built_exe, pkg / "usr" / "local" / "bin" / "PackSync")
+        os.chmod(pkg / "usr" / "local" / "bin" / "PackSync", 0o755)
+        (pkg / "usr" / "share" / "applications" / "pack-sync.desktop").write_text(
+            "[Desktop Entry]\nName=Pack Sync\n"
+            "Exec=/usr/local/bin/PackSync\nType=Application\n"
+            "Categories=Utility;\n"
+        )
+        deb = DIST / "PackSync.deb"
+        subprocess.run(["dpkg-deb", "--build", str(pkg), str(deb)], check=True)
+        size_mb = deb.stat().st_size / 1_048_576
+        print(f"✓  dist/{folder}/PackSync.deb  ({size_mb:.1f} MB)")
+    else:
+        print("  (dpkg-deb not found — skipping .deb packaging)")
 
 # ── Windows / plain exe ───────────────────────────────────────────────────────
 elif built_exe.exists():
